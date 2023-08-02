@@ -75,14 +75,11 @@ func (r *ClusterConfigReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	requeue, err := r.writeInputData(ctx, config)
-	if err != nil {
-		log.WithError(err).Error("failed to write input data")
-		return ctrl.Result{}, err
-	}
-	if requeue {
-		log.Info("requeueing due to lock contention")
-		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+	if res, err := r.writeInputData(ctx, log, config); !res.IsZero() || err != nil {
+		if err != nil {
+			log.Error(err)
+		}
+		return res, err
 	}
 
 	u, err := url.JoinPath(r.BaseURL, "images", req.Namespace, fmt.Sprintf("%s.iso", req.Name))
@@ -202,14 +199,15 @@ func (r *ClusterConfigReconciler) setBMHImage(ctx context.Context, bmhRef *reloc
 }
 
 // writeInputData writes the required info based on the cluster config to the config cache dir
-func (r *ClusterConfigReconciler) writeInputData(ctx context.Context, config *relocationv1alpha1.ClusterConfig) (bool, error) {
+// returns true the reconcile should be requeued due to lock contention
+func (r *ClusterConfigReconciler) writeInputData(ctx context.Context, log logrus.FieldLogger, config *relocationv1alpha1.ClusterConfig) (ctrl.Result, error) {
 	configDir := filepath.Join(r.Options.DataDir, "namespaces", config.Namespace, config.Name)
 	filesDir := filepath.Join(configDir, "files")
 	if err := os.MkdirAll(filesDir, 0700); err != nil {
-		return false, err
+		return ctrl.Result{}, err
 	}
 
-	locked, err := filelock.WithWriteLock(configDir, func() error {
+	locked, lockErr, funcErr := filelock.WithWriteLock(configDir, func() error {
 		if err := r.writeClusterRelocation(config, filepath.Join(filesDir, "cluster-relocation.json")); err != nil {
 			return err
 		}
@@ -236,14 +234,18 @@ func (r *ClusterConfigReconciler) writeInputData(ctx context.Context, config *re
 		// no sense in spending time working on a CM if it's not going to be one in the end
 		return nil
 	})
-	if err != nil {
-		return false, fmt.Errorf("failed to acquire file lock: %w", err)
+	if lockErr != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to acquire file lock: %w", lockErr)
+	}
+	if funcErr != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to write input data: %w", funcErr)
 	}
 	if !locked {
-		return true, nil
+		log.Info("requeueing due to lock contention")
+		return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 	}
 
-	return false, nil
+	return ctrl.Result{}, nil
 }
 
 func (r *ClusterConfigReconciler) writeClusterRelocation(config *relocationv1alpha1.ClusterConfig, file string) error {
