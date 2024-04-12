@@ -280,13 +280,16 @@ func (r *ImageClusterInstallReconciler) checkClusterStatus(ctx context.Context, 
 		log.WithError(err).Error("failed to create spoke client")
 		return ctrl.Result{}, err
 	}
-	installed, err := r.GetSpokeClusterInstallStatus(ctx, log, spokeClient)
+	status, err := r.GetSpokeClusterInstallStatus(ctx, log, spokeClient)
 	if err != nil {
 		log.WithError(err).Error("failed to monitor spoke cluster")
 		return ctrl.Result{}, err
 	}
-	if !installed {
-		log.Info("cluster install in progress")
+	if !status.Installed {
+		log.Info("cluster install in progress: %s", status)
+		if err := r.setClusterInstallingConditions(ctx, ici, status.String()); err != nil {
+			log.WithError(err).Error("failed to set installing conditions")
+		}
 		return ctrl.Result{RequeueAfter: time.Minute}, nil
 	}
 	log.Info("cluster is installed")
