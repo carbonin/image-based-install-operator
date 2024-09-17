@@ -174,7 +174,7 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if err := r.initializeConditions(ctx, ici); err != nil {
-		log.Errorf("Failed to initialize conditions: %s", err)
+		log.WithError(err).Error("Failed to initialize conditions")
 		return ctrl.Result{}, err
 	}
 
@@ -202,7 +202,7 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 		return res, err
 	}
 
-	if err := r.setClusterInstallMetadata(ctx, ici, clusterDeployment.Name); err != nil {
+	if err := r.setClusterInstallMetadata(ctx, log, ici, clusterDeployment.Name); err != nil {
 		log.WithError(err).Error("failed to set ImageClusterInstall data")
 		return ctrl.Result{}, err
 	}
@@ -228,7 +228,7 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 	}
 
 	if ici.Status.BareMetalHostRef != nil && !v1alpha1.BMHRefsMatch(ici.Spec.BareMetalHostRef, ici.Status.BareMetalHostRef) {
-		if _, err := r.removeBMHImage(ctx, ici.Status.BareMetalHostRef); client.IgnoreNotFound(err) != nil {
+		if _, err := r.removeBMHImage(ctx, log, ici.Status.BareMetalHostRef); client.IgnoreNotFound(err) != nil {
 			log.WithError(err).Errorf("failed to remove image from BareMetalHost %s/%s", ici.Status.BareMetalHostRef.Namespace, ici.Status.BareMetalHostRef.Name)
 			return ctrl.Result{}, err
 		}
@@ -240,8 +240,8 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 		if bmh.Spec.Image != nil && bmh.Status.Provisioning.State != bmh_v1alpha1.StateProvisioned &&
 			bmh.Status.Provisioning.State != bmh_v1alpha1.StateProvisioning &&
 			updated {
-			r.Log.Info("Image data was changed, removing image from BareMetalHost")
-			removed, err := r.removeBMHImage(ctx, ici.Spec.BareMetalHostRef)
+			log.Info("Image data was changed, removing image from BareMetalHost")
+			removed, err := r.removeBMHImage(ctx, log, ici.Spec.BareMetalHostRef)
 			if err != nil || removed {
 				if err != nil {
 					log.WithError(err).Error("failed to remove image from BareMetalHost")
@@ -250,12 +250,12 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 			}
 		}
 
-		res, err := r.validateSeedReconfigurationWithBMH(ctx, ici, bmh)
+		res, err := r.validateSeedReconfigurationWithBMH(ctx, log, ici, bmh)
 		if err != nil || !res.IsZero() {
 			return res, err
 		}
 
-		if err := r.setBMHImage(ctx, bmh, imageUrl); err != nil {
+		if err := r.setBMHImage(ctx, log, bmh, imageUrl); err != nil {
 			log.WithError(err).Error("failed to set BareMetalHost image")
 			if updateErr := r.setHostConfiguredCondition(ctx, ici, err); updateErr != nil {
 				log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
@@ -269,7 +269,7 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 			if ici.Status.BootTime.IsZero() {
 				ici.Status.BootTime = metav1.Now()
 			}
-			r.Log.Info("Setting Status.BareMetalHostRef and installation starting condition")
+			log.Info("Setting Status.BareMetalHostRef and installation starting condition")
 			if err := r.Status().Patch(ctx, ici, patch); err != nil {
 				log.WithError(err).Error("failed to set Status.BareMetalHostRef")
 				return ctrl.Result{}, err
@@ -307,15 +307,16 @@ func (r *ImageClusterInstallReconciler) Reconcile(ctx context.Context, req ctrl.
 
 func (r *ImageClusterInstallReconciler) validateSeedReconfigurationWithBMH(
 	ctx context.Context,
+	log logrus.FieldLogger,
 	ici *v1alpha1.ImageClusterInstall,
 	bmh *bmh_v1alpha1.BareMetalHost) (ctrl.Result, error) {
 
 	// no need to validate if inspect annotation is disabled
 	if bmh.ObjectMeta.Annotations != nil && bmh.ObjectMeta.Annotations[inspectAnnotation] == "disabled" {
 		msg := fmt.Sprintf("inspection is disabled for BareMetalHost %s/%s, skip hardware validation", bmh.Namespace, bmh.Name)
-		r.Log.Info(msg)
+		log.Info(msg)
 		if updateErr := r.setRequirementsMetCondition(ctx, ici, corev1.ConditionTrue, v1alpha1.HostValidationSucceeded, msg); updateErr != nil {
-			r.Log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
+			log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
 		}
 		return ctrl.Result{}, nil
 	}
@@ -323,9 +324,9 @@ func (r *ImageClusterInstallReconciler) validateSeedReconfigurationWithBMH(
 	if bmh.Status.HardwareDetails == nil {
 		msg := fmt.Sprintf("hardware details not found for BareMetalHost %s/%s", bmh.Namespace, bmh.Name)
 		if updateErr := r.setRequirementsMetCondition(ctx, ici, corev1.ConditionFalse, v1alpha1.HostValidationPending, msg); updateErr != nil {
-			r.Log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
+			log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
 		}
-		r.Log.Info(msg)
+		log.Info(msg)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
@@ -340,20 +341,20 @@ func (r *ImageClusterInstallReconciler) validateSeedReconfigurationWithBMH(
 		}
 
 		if updateErr := r.setRequirementsMetCondition(ctx, ici, corev1.ConditionTrue, reason, msg); updateErr != nil {
-			r.Log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
+			log.WithError(updateErr).Error("failed to update ImageClusterInstall status")
 		}
 	}()
 
 	clusterInfoFilePath, err = r.clusterInfoFilePath(ici)
 	if err != nil {
-		r.Log.WithError(err).Error("failed to read cluster info file")
+		log.WithError(err).Error("failed to read cluster info file")
 		return ctrl.Result{}, err
 	}
-	clusterInfo := r.getClusterInfoFromFile(clusterInfoFilePath)
+	clusterInfo := r.getClusterInfoFromFile(log, clusterInfoFilePath)
 
 	err = r.validateBMHMachineNetwork(clusterInfo, *bmh.Status.HardwareDetails)
 	if err != nil {
-		r.Log.WithError(err).Error("failed to validate BMH machine network")
+		log.WithError(err).Error("failed to validate BMH machine network")
 		return ctrl.Result{}, err
 	}
 
@@ -537,7 +538,7 @@ func (r *ImageClusterInstallReconciler) SetupWithManager(mgr ctrl.Manager) error
 		Complete(r)
 }
 
-func (r *ImageClusterInstallReconciler) setBMHImage(ctx context.Context, bmh *bmh_v1alpha1.BareMetalHost, url string) error {
+func (r *ImageClusterInstallReconciler) setBMHImage(ctx context.Context, log logrus.FieldLogger, bmh *bmh_v1alpha1.BareMetalHost, url string) error {
 	patch := client.MergeFrom(bmh.DeepCopy())
 
 	dirty := false
@@ -571,7 +572,7 @@ func (r *ImageClusterInstallReconciler) setBMHImage(ctx context.Context, bmh *bm
 	}
 
 	if dirty {
-		r.Log.Infof("Setting image URL to %s for BareMetalHost %s/%s", url, bmh.Namespace, bmh.Name)
+		log.Infof("Setting image URL to %s for BareMetalHost %s/%s", url, bmh.Namespace, bmh.Name)
 		if err := r.Patch(ctx, bmh, patch); err != nil {
 			return err
 		}
@@ -593,7 +594,7 @@ func (r *ImageClusterInstallReconciler) getBMH(ctx context.Context, bmhRef *v1al
 	return bmh, nil
 }
 
-func (r *ImageClusterInstallReconciler) removeBMHImage(ctx context.Context, bmhRef *v1alpha1.BareMetalHostReference) (bool, error) {
+func (r *ImageClusterInstallReconciler) removeBMHImage(ctx context.Context, log logrus.FieldLogger, bmhRef *v1alpha1.BareMetalHostReference) (bool, error) {
 	bmh := &bmh_v1alpha1.BareMetalHost{}
 	key := types.NamespacedName{
 		Name:      bmhRef.Name,
@@ -611,7 +612,7 @@ func (r *ImageClusterInstallReconciler) removeBMHImage(ctx context.Context, bmhR
 	}
 
 	if dirty {
-		r.Log.Infof("Removing image from BareMetalHost %s/%s", bmh.Namespace, bmh.Name)
+		log.Infof("Removing image from BareMetalHost %s/%s", bmh.Namespace, bmh.Name)
 		if err := r.Patch(ctx, bmh, patch); err != nil {
 			return false, err
 		}
@@ -786,7 +787,7 @@ func (r *ImageClusterInstallReconciler) writeInputData(
 		if err != nil {
 			return err
 		}
-		clusterInfo := r.getClusterInfoFromFile(clusterInfoFilePath)
+		clusterInfo := r.getClusterInfoFromFile(log, clusterInfoFilePath)
 		if clusterInfo == nil {
 			clusterInfo = &lca_api.SeedReconfiguration{}
 		}
@@ -833,7 +834,7 @@ func (r *ImageClusterInstallReconciler) writeInputData(
 	return ctrl.Result{}, hashBeforeChanges != hashAfter, nil
 }
 
-func (r *ImageClusterInstallReconciler) getClusterInfoFromFile(clusterInfoFilePath string) *lca_api.SeedReconfiguration {
+func (r *ImageClusterInstallReconciler) getClusterInfoFromFile(log logrus.FieldLogger, clusterInfoFilePath string) *lca_api.SeedReconfiguration {
 	data, err := os.ReadFile(clusterInfoFilePath)
 	if err != nil {
 		// In case it's the first time the ICI gets reconciled the file doesn't exist
@@ -842,7 +843,7 @@ func (r *ImageClusterInstallReconciler) getClusterInfoFromFile(clusterInfoFilePa
 	clusterInfo := lca_api.SeedReconfiguration{}
 	err = json.Unmarshal(data, &clusterInfo)
 	if err != nil {
-		r.Log.Warnf("failed to marshal cluster info: %w", err)
+		log.Warnf("failed to marshal cluster info: %w", err)
 		return nil
 	}
 	return &clusterInfo
@@ -1023,12 +1024,12 @@ func (r *ImageClusterInstallReconciler) writeImageDigestSourceToFile(imageDigest
 	return nil
 }
 
-func (r *ImageClusterInstallReconciler) setClusterInstallMetadata(ctx context.Context, ici *v1alpha1.ImageClusterInstall, clusterDeploymentName string) error {
+func (r *ImageClusterInstallReconciler) setClusterInstallMetadata(ctx context.Context, log logrus.FieldLogger, ici *v1alpha1.ImageClusterInstall, clusterDeploymentName string) error {
 	clusterInfoFilePath, err := r.clusterInfoFilePath(ici)
 	if err != nil {
 		return err
 	}
-	clusterInfo := r.getClusterInfoFromFile(clusterInfoFilePath)
+	clusterInfo := r.getClusterInfoFromFile(log, clusterInfoFilePath)
 	if clusterInfo == nil {
 		return fmt.Errorf("No cluster info found for ImageClusterInstall %s/%s", ici.Namespace, ici.Name)
 	}
